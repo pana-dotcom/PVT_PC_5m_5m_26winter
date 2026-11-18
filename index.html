@@ -60,7 +60,6 @@ body {
 }
 </style>
 </head>
-
 <body>
 
 <div id="enterStart" aria-live="polite">Enterキーを押して待機を開始してください</div>
@@ -74,9 +73,9 @@ body {
 <script>
 'use strict';
 
-const TEST_DURATION = 270000;       // タスク本体：4分30秒
-const PREPARATION_DURATION = 300000; // 開始前の注視点：300秒
-const COUNTDOWN_DURATION = 5000;    // 開始5秒前からカウントダウン
+const TEST_DURATION = 270000;        // タスク本体：4分30秒
+const PREPARATION_DURATION = 300000; // 開始前の注視点：5分
+const COUNTDOWN_DURATION = 5000;     // 開始5秒前からカウントダウン
 
 let startTime;
 let taskStartTime;
@@ -95,6 +94,8 @@ let forceEndTimer = null;
 
 let results = [];
 let audioContext = null;
+let wakeLock = null;
+let wakeLockRequired = false;
 
 const box = document.getElementById("box");
 const enterStartDiv = document.getElementById("enterStart");
@@ -110,6 +111,67 @@ function formatTime(date) {
     const s = String(date.getSeconds()).padStart(2, "0");
     return `${h}:${m}:${s}`;
 }
+
+//====================
+// Screen Wake Lock
+//====================
+async function requestScreenWakeLock() {
+    wakeLockRequired = true;
+
+    if (!("wakeLock" in navigator)) {
+        console.warn("このブラウザーはScreen Wake Lock APIに対応していません。");
+        return false;
+    }
+
+    if (wakeLock !== null) {
+        return true;
+    }
+
+    try {
+        wakeLock = await navigator.wakeLock.request("screen");
+
+        wakeLock.addEventListener("release", () => {
+            console.warn("画面起動ロックが解除されました。");
+            wakeLock = null;
+        });
+
+        console.log("画面起動ロックを取得しました。");
+        return true;
+    } catch (error) {
+        console.warn("画面起動ロックを取得できませんでした。", error);
+        wakeLock = null;
+        return false;
+    }
+}
+
+async function releaseScreenWakeLock() {
+    wakeLockRequired = false;
+
+    if (wakeLock !== null) {
+        try {
+            await wakeLock.release();
+        } catch (error) {
+            console.warn("画面起動ロックの解除に失敗しました。", error);
+        }
+        wakeLock = null;
+    }
+}
+
+// タブ切り替えや最小化で解除された場合、画面に戻ったときに再取得する。
+document.addEventListener("visibilitychange", () => {
+    if (
+        document.visibilityState === "visible" &&
+        wakeLockRequired &&
+        wakeLock === null
+    ) {
+        void requestScreenWakeLock();
+    }
+});
+
+// ページを閉じるときは解除する。
+window.addEventListener("pagehide", () => {
+    void releaseScreenWakeLock();
+});
 
 //====================
 // 音声
@@ -178,7 +240,6 @@ function unlockAudio() {
             void context.resume();
         }
 
-        // ボタン操作中に無音を短く再生し、後続音を許可する。
         const oscillator = context.createOscillator();
         const gain = context.createGain();
         gain.gain.setValueAtTime(0.0001, context.currentTime);
@@ -192,7 +253,7 @@ function unlockAudio() {
 }
 
 //====================
-// 300秒の開始前待機
+// 5分の開始前待機
 //====================
 function beginPreparation() {
     if (isPreparing || isRunning) return;
@@ -200,8 +261,9 @@ function beginPreparation() {
     results = [];
     isPreparing = true;
 
-    // Enter操作で音声機能を有効化する。
+    // 最初のEnter操作で音声を有効化し、画面消灯防止も要求する。
     unlockAudio();
+    void requestScreenWakeLock();
 
     enterStartDiv.style.display = "none";
     taskInstruction.style.visibility = "hidden";
@@ -214,13 +276,11 @@ function beginPreparation() {
     preparationMessage.textContent =
         "開始まで注視点を見て待機してください";
 
-    // 25秒経過時に、開始5秒前のカウントダウンを開始。
     countdownStartTimer = setTimeout(
         startCountdown,
         PREPARATION_DURATION - COUNTDOWN_DURATION
     );
 
-    // 30秒経過時にPVT本体を自動開始。
     preparationTimer = setTimeout(
         beginTask,
         PREPARATION_DURATION
@@ -239,7 +299,6 @@ document.addEventListener("keydown", (event) => {
 function startCountdown() {
     if (!isPreparing) return;
 
-    // 開始5秒前の音。
     void playTone(659.25, 500, 0.20);
 
     preparationMessage.textContent = "";
@@ -271,10 +330,8 @@ function beginTask() {
     preparationMessage.textContent = "";
     taskInstruction.style.visibility = "visible";
 
-    // タスク開始時の音。5秒前より高い音にして区別する。
     void playTone(880, 600, 0.22);
 
-    // 4分30秒の計測は、この時点から開始する。
     taskStartTime = new Date();
 
     forceEndTimer = setTimeout(() => {
@@ -298,7 +355,6 @@ function startTest() {
 
     waiting = true;
 
-    // 2,000 ms以上、10,000 ms未満のランダム待機。
     const delay = Math.random() * 8000 + 2000;
 
     nextStimulusPerfTime = performance.now() + delay;
@@ -342,7 +398,6 @@ document.addEventListener("keyup", (event) => {
 function handleResponse() {
     if (!isRunning) return;
 
-    // 赤刺激提示前の先行反応。
     if (waiting) {
         const remaining = Math.round(
             nextStimulusPerfTime - performance.now()
@@ -356,7 +411,6 @@ function handleResponse() {
         return;
     }
 
-    // 赤刺激提示後の正常反応。
     const endTime = performance.now();
     const rt = Math.round(endTime - startTime);
 
@@ -392,6 +446,9 @@ function endTest() {
     preparationMessage.textContent = "";
 
     downloadCSV();
+
+    // テスト終了後は画面消灯防止を解除する。
+    void releaseScreenWakeLock();
 }
 
 //====================
@@ -406,7 +463,7 @@ function downloadCSV() {
         String(now.getDate()).padStart(2, "0") +
         "_" +
         String(now.getHours()).padStart(2, "0") +
-        String(now.getMinutes()).padStart(2, "0")+
+        String(now.getMinutes()).padStart(2, "0") +
         String(now.getSeconds()).padStart(2, "0");
 
     let csv = "trial,RT,time\n";
@@ -428,7 +485,6 @@ function downloadCSV() {
             timeCol + "\n";
     });
 
-    // データが0件または1件しかない場合の保険。
     if (results.length === 0) {
         csv += ",," + formatTime(taskStartTime) + "\n";
         csv += ",," + formatTime(taskEndTime) + "\n";
@@ -436,7 +492,6 @@ function downloadCSV() {
         csv += ",," + formatTime(taskEndTime) + "\n";
     }
 
-    // Excelでの文字化けを防ぐUTF-8 BOM。
     const blob = new Blob(
         ["\uFEFF" + csv],
         { type: "text/csv;charset=utf-8;" }
@@ -455,6 +510,5 @@ function downloadCSV() {
     setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 </script>
-
 </body>
 </html>
